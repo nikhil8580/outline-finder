@@ -1,0 +1,503 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Outline Finder</title>
+<style>
+  :root {
+    --bg: #f3f4ef;
+    --surface: #ffffff;
+    --ink: #1c231f;
+    --ink-soft: #4b564f;
+    --ink-faint: #7c8780;
+    --accent: #2f6f62;
+    --accent-soft: #e3ece9;
+    --line: #d9dcd3;
+    --line-soft: #e7e9e2;
+    --good: #2e7d4f;
+    --good-soft: #e4f2e8;
+    --warn: #a8763a;
+    --warn-soft: #f1e6d6;
+    --danger: #a5433a;
+    --danger-soft: #f7e8e6;
+    --shadow: 0 1px 2px rgba(28,35,31,0.05), 0 8px 24px rgba(28,35,31,0.05);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #141815; --surface: #1c2320; --ink: #e8eae3; --ink-soft: #aab3a6;
+      --ink-faint: #78827a; --accent: #74c0ac; --accent-soft: #223330;
+      --line: #323a34; --line-soft: #262d29;
+      --good: #6fbf8f; --good-soft: #1c2b21;
+      --warn: #d8ab73; --warn-soft: #2e2a20;
+      --danger: #d98d83; --danger-soft: #2e211f;
+      --shadow: 0 1px 2px rgba(0,0,0,0.3), 0 8px 24px rgba(0,0,0,0.25);
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--bg); }
+  body {
+    color: var(--ink);
+    font-family: -apple-system, "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+    font-size: 15px;
+    line-height: 1.55;
+    -webkit-font-smoothing: antialiased;
+  }
+  .serif { font-family: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif; }
+  .mono { font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+
+  .page { max-width: 880px; margin: 0 auto; padding: 48px 24px 96px; }
+
+  .eyebrow {
+    display: inline-flex; align-items: center; gap: 8px;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 11px; letter-spacing: 0.1em; text-transform: uppercase;
+    color: var(--accent); background: var(--accent-soft);
+    padding: 5px 10px 5px 8px; border-radius: 4px; margin-bottom: 18px;
+  }
+  .eyebrow::before { content: "●"; font-size: 8px; }
+
+  h1.title { font-size: 32px; margin: 0 0 10px; font-weight: 600; letter-spacing: -0.01em; }
+  p.dek { color: var(--ink-soft); max-width: 64ch; margin: 0 0 28px; }
+
+  .card {
+    background: var(--surface); border: 1px solid var(--line); border-radius: 12px;
+    padding: 24px; box-shadow: var(--shadow); margin-bottom: 20px;
+  }
+
+  button {
+    font: inherit; cursor: pointer; border: none; border-radius: 8px;
+    padding: 11px 18px; font-weight: 600; font-size: 14px;
+    transition: opacity 0.15s ease, transform 0.1s ease;
+  }
+  button:disabled { opacity: 0.45; cursor: not-allowed; }
+  button:active:not(:disabled) { transform: scale(0.98); }
+  .btn-primary { background: var(--accent); color: var(--surface); }
+  .btn-ghost { background: var(--accent-soft); color: var(--accent); }
+  .btn-danger-outline { background: transparent; color: var(--danger); border: 1px solid var(--line); padding: 6px 10px; font-size: 12.5px; }
+
+  #signed-out-view, #signed-in-view { display: none; }
+  body.state-signed-out #signed-out-view { display: block; }
+  body.state-signed-in #signed-in-view { display: block; }
+
+  .who { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 4px; }
+  .who .email { font-size: 13.5px; color: var(--ink-soft); }
+  .who .email b { color: var(--ink); }
+  .link-btn { background: none; border: none; color: var(--ink-faint); font-size: 12.5px; text-decoration: underline; padding: 0; }
+
+  .scan-row { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+  .status-line { font-size: 13.5px; color: var(--ink-faint); }
+  .status-line.active { color: var(--accent); }
+
+  .spinner {
+    width: 14px; height: 14px; border-radius: 50%;
+    border: 2px solid var(--accent-soft); border-top-color: var(--accent);
+    display: inline-block; animation: spin 0.7s linear infinite; vertical-align: -2px;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  @media (prefers-reduced-motion: reduce) { .spinner { animation: none; } }
+
+  .summary-strip { display: flex; gap: 10px; flex-wrap: wrap; margin: 20px 0 4px; }
+  .stat-chip {
+    font-size: 13px; background: var(--surface); border: 1px solid var(--line);
+    border-radius: 8px; padding: 8px 14px; display: flex; gap: 6px; align-items: baseline;
+  }
+  .stat-chip b { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-variant-numeric: tabular-nums; color: var(--ink); font-size: 15px; }
+  .stat-chip span { color: var(--ink-faint); }
+
+  .results-list { display: flex; flex-direction: column; gap: 8px; margin-top: 16px; }
+  .result-row {
+    display: flex; align-items: center; gap: 12px;
+    background: var(--surface); border: 1px solid var(--line); border-radius: 10px;
+    padding: 12px 14px; transition: opacity 0.2s ease;
+  }
+  .result-row.removed { opacity: 0.4; }
+  .result-row.moved { opacity: 0.55; }
+  .result-row input[type="checkbox"] { width: 17px; height: 17px; accent-color: var(--accent); flex-shrink: 0; }
+  .result-main { flex: 1; min-width: 0; }
+  .result-title { font-weight: 600; font-size: 14px; }
+  .result-title a { color: var(--ink); text-decoration: none; }
+  .result-title a:hover { color: var(--accent); }
+  .result-meta { font-size: 12.5px; color: var(--ink-faint); margin-top: 3px; display: flex; gap: 10px; flex-wrap: wrap; }
+  .match-badge {
+    font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 11px; font-weight: 700;
+    background: var(--accent-soft); color: var(--accent); padding: 2px 7px; border-radius: 20px;
+    flex-shrink: 0;
+  }
+  .row-status { font-size: 12px; font-weight: 600; flex-shrink: 0; min-width: 64px; text-align: right; }
+  .row-status.pending { color: var(--ink-faint); }
+  .row-status.moving { color: var(--warn); }
+  .row-status.moved { color: var(--good); }
+  .row-status.failed { color: var(--danger); }
+
+  .empty-state { text-align: center; padding: 40px 20px; color: var(--ink-faint); font-size: 14px; }
+
+  .action-bar {
+    position: sticky; bottom: 16px; margin-top: 20px;
+    background: var(--surface); border: 1px solid var(--line); border-radius: 12px;
+    padding: 16px 20px; box-shadow: var(--shadow);
+    display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap;
+  }
+  .action-bar .count { font-size: 14px; color: var(--ink-soft); }
+  .action-bar .count b { color: var(--ink); }
+
+  .error-box {
+    background: var(--danger-soft); color: var(--danger); border-radius: 8px;
+    padding: 12px 14px; font-size: 13.5px; margin-top: 14px; display: none;
+  }
+  .error-box.visible { display: block; }
+
+  .keyword-list { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 10px; }
+  .keyword-chip {
+    font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 11.5px;
+    background: var(--line-soft); color: var(--ink-soft); padding: 4px 9px; border-radius: 6px;
+  }
+</style>
+</head>
+<body class="state-signed-out">
+<div class="page">
+
+  <span class="eyebrow">Outline Finder</span>
+  <h1 class="title serif">Find outlines scattered across your Drive</h1>
+  <p class="dek">
+    Sign in with your own Google account. This searches your My Drive and any Shared Drives
+    you belong to for documents that look like course outlines, so you can review them and move
+    the real ones into the Content Repository — where the automated tracker picks them up
+    automatically from then on.
+  </p>
+
+  <div id="signed-out-view" class="card">
+    <button id="signin-btn" class="btn-primary">Sign in with Google</button>
+    <div class="keyword-list">
+      <span class="keyword-chip">Course Overview</span>
+      <span class="keyword-chip">Course Outline</span>
+      <span class="keyword-chip">Target Audience</span>
+      <span class="keyword-chip">Duration</span>
+      <span class="keyword-chip">Prerequisites</span>
+    </div>
+    <p style="font-size:12.5px;color:var(--ink-faint);margin:10px 0 0;">
+      A document counts as a candidate outline if it contains at least 3 of these.
+    </p>
+    <div id="signin-error" class="error-box"></div>
+  </div>
+
+  <div id="signed-in-view">
+    <div class="card">
+      <div class="who">
+        <span class="email">Signed in as <b id="user-email"></b></span>
+        <button id="signout-btn" class="link-btn">Sign out</button>
+      </div>
+      <div class="scan-row" style="margin-top:14px;">
+        <button id="scan-btn" class="btn-primary">Scan my Drive</button>
+        <span id="scan-status" class="status-line"></span>
+      </div>
+      <div id="scan-error" class="error-box"></div>
+    </div>
+
+    <div id="results-section" style="display:none;">
+      <div class="summary-strip">
+        <div class="stat-chip"><b id="stat-found">0</b><span>found</span></div>
+        <div class="stat-chip"><b id="stat-selected">0</b><span>selected</span></div>
+        <div class="stat-chip"><b id="stat-moved">0</b><span>moved</span></div>
+      </div>
+
+      <div id="results-list" class="results-list"></div>
+      <div id="empty-state" class="empty-state" style="display:none;">
+        No candidates found — nothing matched 3 or more of the keywords.
+      </div>
+
+      <div class="action-bar">
+        <span class="count"><b id="footer-count">0</b> selected</span>
+        <button id="move-btn" class="btn-primary" disabled>Move selected to Outlines folder</button>
+      </div>
+      <div id="move-error" class="error-box"></div>
+    </div>
+  </div>
+
+</div>
+
+<script src="https://accounts.google.com/gsi/client" async defer></script>
+<script>
+// ---------------------------------------------------------------------------
+// Config — fill in CLIENT_ID after creating the OAuth Web application client
+// ---------------------------------------------------------------------------
+const CONFIG = {
+  clientId: "REPLACE_WITH_OAUTH_CLIENT_ID.apps.googleusercontent.com",
+  scope: "https://www.googleapis.com/auth/drive",
+  outlinesFolderId: "17UdEp82ssZJzkyLsu6CTt1kXcl32qrnn",
+  kbArticlesFolderId: "1OtvXvY3EEcSDGReOsA7oqofVB60cJvU3",
+  keywords: ["Course Overview", "Course Outline", "Target Audience", "Duration", "Prerequisites"],
+  minMatches: 3,
+};
+
+let tokenClient = null;
+let accessToken = null;
+let candidates = []; // {id, name, webViewLink, createdTime, parents, matchCount, removed, status}
+
+const el = (id) => document.getElementById(id);
+
+function showError(boxId, message) {
+  const box = el(boxId);
+  box.textContent = message;
+  box.classList.add("visible");
+}
+function clearError(boxId) {
+  const box = el(boxId);
+  box.textContent = "";
+  box.classList.remove("visible");
+}
+
+// ---------------------------------------------------------------------------
+// Auth
+// ---------------------------------------------------------------------------
+
+window.onload = () => {
+  tokenClient = google.accounts.oauth2.initTokenClient({
+    client_id: CONFIG.clientId,
+    scope: CONFIG.scope,
+    callback: async (response) => {
+      if (response.error) {
+        showError("signin-error", `Sign-in failed: ${response.error}`);
+        return;
+      }
+      accessToken = response.access_token;
+      await onSignedIn();
+    },
+  });
+
+  el("signin-btn").addEventListener("click", () => {
+    clearError("signin-error");
+    tokenClient.requestAccessToken({ prompt: "consent" });
+  });
+  el("signout-btn").addEventListener("click", signOut);
+  el("scan-btn").addEventListener("click", runScan);
+  el("move-btn").addEventListener("click", moveSelected);
+};
+
+async function onSignedIn() {
+  document.body.className = "state-signed-in";
+  const res = await driveFetch("https://www.googleapis.com/drive/v3/about?fields=user(emailAddress)");
+  const data = await res.json();
+  el("user-email").textContent = data.user?.emailAddress || "unknown";
+}
+
+function signOut() {
+  if (accessToken) {
+    google.accounts.oauth2.revoke(accessToken, () => {});
+  }
+  accessToken = null;
+  candidates = [];
+  document.body.className = "state-signed-out";
+  el("results-section").style.display = "none";
+}
+
+async function driveFetch(url, options = {}) {
+  const res = await fetch(url, {
+    ...options,
+    headers: { ...(options.headers || {}), Authorization: `Bearer ${accessToken}` },
+  });
+  if (res.status === 401) {
+    signOut();
+    throw new Error("Session expired — please sign in again.");
+  }
+  return res;
+}
+
+// ---------------------------------------------------------------------------
+// Search
+// ---------------------------------------------------------------------------
+
+async function searchKeyword(keyword) {
+  const escaped = keyword.replace(/'/g, "\\'");
+  const q = `fullText contains '${escaped}' and trashed = false and (mimeType = 'application/vnd.google-apps.document' or mimeType = 'application/pdf')`;
+
+  let files = [];
+  let pageToken = null;
+  do {
+    const url = new URL("https://www.googleapis.com/drive/v3/files");
+    url.searchParams.set("q", q);
+    url.searchParams.set("corpora", "allDrives");
+    url.searchParams.set("includeItemsFromAllDrives", "true");
+    url.searchParams.set("supportsAllDrives", "true");
+    url.searchParams.set("pageSize", "100");
+    url.searchParams.set("fields", "nextPageToken, files(id,name,webViewLink,createdTime,parents,mimeType)");
+    if (pageToken) url.searchParams.set("pageToken", pageToken);
+
+    const res = await driveFetch(url.toString());
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error?.message || `Search for "${keyword}" failed (HTTP ${res.status})`);
+    }
+    const data = await res.json();
+    files = files.concat(data.files || []);
+    pageToken = data.nextPageToken;
+  } while (pageToken);
+
+  return files;
+}
+
+async function runScan() {
+  clearError("scan-error");
+  el("scan-btn").disabled = true;
+  el("results-section").style.display = "none";
+  candidates = [];
+
+  const matchCounts = new Map();
+  const fileMeta = new Map();
+
+  try {
+    for (const keyword of CONFIG.keywords) {
+      el("scan-status").innerHTML = `<span class="spinner"></span> searching "${keyword}"...`;
+      el("scan-status").classList.add("active");
+      const files = await searchKeyword(keyword);
+      for (const f of files) {
+        matchCounts.set(f.id, (matchCounts.get(f.id) || 0) + 1);
+        fileMeta.set(f.id, f);
+      }
+    }
+
+    const alreadyOrganized = new Set([CONFIG.outlinesFolderId, CONFIG.kbArticlesFolderId]);
+
+    for (const [id, count] of matchCounts) {
+      if (count < CONFIG.minMatches) continue;
+      const meta = fileMeta.get(id);
+      const parents = meta.parents || [];
+      if (parents.some((p) => alreadyOrganized.has(p))) continue; // already filed correctly
+      candidates.push({
+        id,
+        name: meta.name,
+        webViewLink: meta.webViewLink,
+        createdTime: meta.createdTime,
+        parents,
+        matchCount: count,
+        removed: false,
+        status: "pending",
+      });
+    }
+    candidates.sort((a, b) => b.matchCount - a.matchCount);
+
+    el("scan-status").textContent = `Done — checked ${CONFIG.keywords.length} keywords.`;
+    el("scan-status").classList.remove("active");
+    renderResults();
+  } catch (e) {
+    showError("scan-error", e.message);
+    el("scan-status").textContent = "";
+  } finally {
+    el("scan-btn").disabled = false;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Results rendering
+// ---------------------------------------------------------------------------
+
+function renderResults() {
+  el("results-section").style.display = "block";
+  const list = el("results-list");
+  list.innerHTML = "";
+
+  el("empty-state").style.display = candidates.length === 0 ? "block" : "none";
+
+  for (const c of candidates) {
+    const row = document.createElement("div");
+    row.className = "result-row" + (c.removed ? " removed" : "") + (c.status === "moved" ? " moved" : "");
+
+    const created = c.createdTime ? c.createdTime.split("T")[0] : "";
+
+    row.innerHTML = `
+      <input type="checkbox" ${c.removed || c.status === "moved" ? "" : "checked"}
+             ${c.removed || c.status === "moved" ? "disabled" : ""} data-id="${c.id}">
+      <div class="result-main">
+        <div class="result-title"><a href="${c.webViewLink}" target="_blank" rel="noopener">${escapeHtml(c.name)}</a></div>
+        <div class="result-meta">
+          <span>Created ${created}</span>
+          <span class="match-badge">${c.matchCount}/${CONFIG.keywords.length} matched</span>
+        </div>
+      </div>
+      <span class="row-status ${c.status}">${statusLabel(c.status)}</span>
+      ${c.status === "pending" && !c.removed ? '<button class="btn-danger-outline" data-remove="' + c.id + '">Remove</button>' : ""}
+    `;
+    list.appendChild(row);
+  }
+
+  list.querySelectorAll("input[type=checkbox]").forEach((cb) => {
+    cb.addEventListener("change", (e) => {
+      updateSelectionCount();
+    });
+  });
+  list.querySelectorAll("[data-remove]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const id = btn.getAttribute("data-remove");
+      const c = candidates.find((x) => x.id === id);
+      if (c) c.removed = true;
+      renderResults();
+    });
+  });
+
+  updateSelectionCount();
+}
+
+function statusLabel(status) {
+  return { pending: "", moving: "Moving…", moved: "Moved ✓", failed: "Failed" }[status] || "";
+}
+
+function escapeHtml(s) {
+  const div = document.createElement("div");
+  div.textContent = s;
+  return div.innerHTML;
+}
+
+function selectedCandidates() {
+  const checked = new Set(
+    Array.from(document.querySelectorAll("#results-list input[type=checkbox]:checked")).map((cb) => cb.getAttribute("data-id"))
+  );
+  return candidates.filter((c) => checked.has(c.id) && !c.removed && c.status !== "moved");
+}
+
+function updateSelectionCount() {
+  const n = selectedCandidates().length;
+  el("stat-found").textContent = candidates.length;
+  el("stat-selected").textContent = n;
+  el("stat-moved").textContent = candidates.filter((c) => c.status === "moved").length;
+  el("footer-count").textContent = n;
+  el("move-btn").disabled = n === 0;
+}
+
+// ---------------------------------------------------------------------------
+// Move
+// ---------------------------------------------------------------------------
+
+async function moveSelected() {
+  clearError("move-error");
+  const toMove = selectedCandidates();
+  el("move-btn").disabled = true;
+
+  for (const c of toMove) {
+    c.status = "moving";
+    renderResults();
+
+    try {
+      const url = new URL(`https://www.googleapis.com/drive/v3/files/${c.id}`);
+      url.searchParams.set("addParents", CONFIG.outlinesFolderId);
+      if (c.parents.length) url.searchParams.set("removeParents", c.parents.join(","));
+      url.searchParams.set("supportsAllDrives", "true");
+      url.searchParams.set("fields", "id,parents");
+
+      const res = await driveFetch(url.toString(), { method: "PATCH" });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.error?.message || `HTTP ${res.status}`);
+      }
+      c.status = "moved";
+    } catch (e) {
+      c.status = "failed";
+      showError("move-error", `"${c.name}": ${e.message}`);
+    }
+    renderResults();
+  }
+
+  el("move-btn").disabled = selectedCandidates().length === 0;
+}
+</script>
+</body>
+</html>
