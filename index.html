@@ -151,6 +151,8 @@
   .tag { font-size: 11px; padding: 2px 7px; border-radius: 20px; background: var(--warn-soft); color: var(--warn); }
   .tag.ok { background: var(--good-soft); color: var(--good); }
   .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+  .owner-line { font-size: 12.5px; color: var(--ink-soft); margin-top: 3px; }
+  .owner-line a { color: var(--accent); }
   .keyword-list { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 10px; }
   .keyword-chip {
     font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 11.5px;
@@ -218,6 +220,16 @@
         <button id="move-btn" class="btn-primary" disabled>Move selected to Outlines folder</button>
       </div>
       <div id="move-error" class="error-box"></div>
+
+      <div id="others-section" class="card" style="display:none;margin-top:24px;">
+        <h2 class="serif" style="margin:0 0 6px;font-size:20px;">Outlines owned by someone else</h2>
+        <p style="margin:0 0 14px;font-size:13.5px;color:var(--ink-soft);">
+          These weren't created by you, so they can't be moved from here. Contact the owner and ask them to
+          move the outline into the Outlines folder (or share it with you with edit access).
+        </p>
+        <div id="others-list" class="results-list" style="margin-top:0;"></div>
+        <button id="copy-others-btn" class="btn-ghost" style="margin-top:14px;">Copy list</button>
+      </div>
     </div>
   </div>
 
@@ -307,6 +319,16 @@ window.addEventListener("load", () => {
   el("signout-btn").addEventListener("click", signOut);
   el("scan-btn").addEventListener("click", runScan);
   el("move-btn").addEventListener("click", moveSelected);
+  el("copy-others-btn").addEventListener("click", async () => {
+    const btn = el("copy-others-btn");
+    try {
+      await navigator.clipboard.writeText(othersAsText());
+      btn.textContent = "Copied ✓";
+    } catch {
+      btn.textContent = "Copy failed";
+    }
+    setTimeout(() => (btn.textContent = "Copy list"), 1800);
+  });
 });
 
 async function onSignedIn() {
@@ -335,6 +357,7 @@ function signOut() {
   candidates = [];
   document.body.className = "state-signed-out";
   el("results-section").style.display = "none";
+  el("others-section").style.display = "none";
   el("scan-status").textContent = "";
   el("scan-status").classList.remove("active");
   el("scan-btn").disabled = false;
@@ -399,7 +422,7 @@ async function listFiles(q, fields) {
   return files;
 }
 
-const FILE_FIELDS = "id,name,webViewLink,createdTime,parents,mimeType,capabilities(canEdit,canMoveItemWithinDrive,canMoveItemOutOfDrive)";
+const FILE_FIELDS = "id,name,webViewLink,createdTime,parents,mimeType,capabilities(canEdit,canMoveItemWithinDrive,canMoveItemOutOfDrive),ownedByMe,owners(displayName,emailAddress)";
 
 function searchKeyword(keyword) {
   const q = `fullText contains '${quote(keyword)}' and trashed = false and (mimeType = '${MIME_DOC}' or mimeType = '${MIME_PDF}')`;
@@ -492,6 +515,9 @@ async function runScan() {
       const parents = meta.parents || [];
       if (parents.some((p) => organized.has(p))) continue; // already filed correctly
       const caps = meta.capabilities || {};
+      const owner = (meta.owners || [])[0];
+      // Files in Shared Drives have no owners; only a personal file with ownedByMe === false is "someone else's".
+      const notOwned = meta.ownedByMe === false && !!owner;
       candidates.push({
         id,
         name: meta.name,
@@ -501,7 +527,10 @@ async function runScan() {
         parents,
         matchCount: count,
         verified: false,
-        movable: caps.canEdit !== false && caps.canMoveItemWithinDrive !== false,
+        notOwned,
+        ownerName: owner?.displayName || "",
+        ownerEmail: owner?.emailAddress || "",
+        movable: !notOwned && caps.canEdit !== false && caps.canMoveItemWithinDrive !== false,
         selected: true,
         removed: false,
         status: "pending",
@@ -571,9 +600,12 @@ function renderResults() {
   el("results-section").style.display = "block";
   const list = el("results-list");
   list.replaceChildren();
-  el("empty-state").style.display = candidates.length === 0 ? "block" : "none";
+  const mine = candidates.filter((c) => !c.notOwned);
+  const others = candidates.filter((c) => c.notOwned);
+  el("empty-state").style.display = mine.length === 0 && others.length === 0 ? "block" : "none";
+  renderOthers(others);
 
-  for (const c of candidates) {
+  for (const c of mine) {
     const canSelect = isActionable(c) && c.movable && c.status !== "moving";
     const created = c.createdTime ? c.createdTime.split("T")[0] : "";
 
@@ -602,6 +634,7 @@ function renderResults() {
           c.verified ? h("span", { class: "tag ok", text: "verified" }) : h("span", { class: "tag", text: "unverified" }),
           !c.movable ? h("span", { class: "tag", text: "no move permission" }) : null
         ),
+        ownerLine(c),
         c.error ? h("div", { class: "row-error", text: c.error }) : null
       ),
       h("span", { class: `row-status ${c.status}`, text: statusLabel(c.status) }),
@@ -620,6 +653,49 @@ function renderResults() {
     list.appendChild(row);
   }
   updateSelectionCount();
+}
+
+function ownerLine(c) {
+  if (c.notOwned) {
+    return h(
+      "div",
+      { class: "owner-line" },
+      "Owner: ",
+      c.ownerName || c.ownerEmail,
+      c.ownerEmail
+        ? h("span", {}, " (", h("a", { href: `mailto:${encodeURIComponent(c.ownerEmail)}?subject=${encodeURIComponent("Course outline: " + c.name)}`, text: c.ownerEmail }), ")")
+        : null
+    );
+  }
+  return h("div", { class: "owner-line", text: c.ownerName ? `Owner: ${c.ownerName} (you)` : "Owner: you / Shared Drive" });
+}
+
+function renderOthers(others) {
+  el("others-section").style.display = others.length ? "block" : "none";
+  const list = el("others-list");
+  list.replaceChildren();
+  for (const c of others) {
+    list.appendChild(
+      h(
+        "div",
+        { class: "result-row" },
+        h(
+          "div",
+          { class: "result-main" },
+          h("div", { class: "result-title" }, h("a", { href: safeUrl(c.webViewLink), target: "_blank", rel: "noopener noreferrer", text: c.name })),
+          ownerLine(c),
+          h("div", { class: "result-meta" }, h("span", { class: "match-badge", text: `${c.matchCount}/${CONFIG.keywords.length} matched` }), c.verified ? null : h("span", { class: "tag", text: "unverified" }))
+        )
+      )
+    );
+  }
+}
+
+function othersAsText() {
+  return candidates
+    .filter((c) => c.notOwned)
+    .map((c) => `${c.name} — ${c.ownerName || "unknown"}${c.ownerEmail ? ` <${c.ownerEmail}>` : ""} — ${c.webViewLink}`)
+    .join("\n");
 }
 
 function statusLabel(status) {
