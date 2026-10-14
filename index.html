@@ -147,6 +147,10 @@
   }
   .error-box.visible { display: block; }
 
+  .row-error { font-size: 12px; color: var(--danger); margin-top: 3px; }
+  .tag { font-size: 11px; padding: 2px 7px; border-radius: 20px; background: var(--warn-soft); color: var(--warn); }
+  .tag.ok { background: var(--good-soft); color: var(--good); }
+  .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
   .keyword-list { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 10px; }
   .keyword-chip {
     font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 11.5px;
@@ -163,7 +167,8 @@
     Sign in with your own Google account. This searches your My Drive and any Shared Drives
     you belong to for documents that look like course outlines, so you can review them and move
     the real ones into the Content Repository — where the automated tracker picks them up
-    automatically from then on.
+    automatically from then on. Files already in the Outlines or KB Articles folders (including
+    their subfolders) are skipped.
   </p>
 
   <div id="signed-out-view" class="card">
@@ -176,7 +181,9 @@
       <span class="keyword-chip">Prerequisites</span>
     </div>
     <p style="font-size:12.5px;color:var(--ink-faint);margin:10px 0 0;">
-      A document counts as a candidate outline if it contains at least 3 of these.
+      A document counts as a candidate outline if at least 3 of these appear as headings or labels
+      (e.g. "Duration: 3 days"). Google Docs are verified by reading their text; PDFs can only be
+      matched by Drive's search index and are marked "unverified".
     </p>
     <div id="signin-error" class="error-box"></div>
   </div>
@@ -189,7 +196,7 @@
       </div>
       <div class="scan-row" style="margin-top:14px;">
         <button id="scan-btn" class="btn-primary">Scan my Drive</button>
-        <span id="scan-status" class="status-line"></span>
+        <span id="scan-status" class="status-line" role="status" aria-live="polite"></span>
       </div>
       <div id="scan-error" class="error-box"></div>
     </div>
@@ -203,7 +210,7 @@
 
       <div id="results-list" class="results-list"></div>
       <div id="empty-state" class="empty-state" style="display:none;">
-        No candidates found — nothing matched 3 or more of the keywords.
+        No candidates found — nothing matched 3 or more of the keywords outside the Outlines and KB Articles folders.
       </div>
 
       <div class="action-bar">
@@ -216,25 +223,34 @@
 
 </div>
 
-<script src="https://accounts.google.com/gsi/client" async defer></script>
+<script src="https://accounts.google.com/gsi/client" async defer onload="initAuth()"></script>
 <script>
 // ---------------------------------------------------------------------------
-// Config — fill in CLIENT_ID after creating the OAuth Web application client
+// Config — fill in clientId after creating the OAuth Web application client
+// (add this page's origin under "Authorized JavaScript origins").
+// The full `drive` scope is required to move files you did not create.
 // ---------------------------------------------------------------------------
 const CONFIG = {
-  clientId: "REPLACE_WITH_OAUTH_CLIENT_ID.apps.googleusercontent.com",
+  clientId: "1069156032287-nnm53e2pqdtogg506lv5a3vshe0dtg3o.apps.googleusercontent.com",
   scope: "https://www.googleapis.com/auth/drive",
   outlinesFolderId: "17UdEp82ssZJzkyLsu6CTt1kXcl32qrnn",
   kbArticlesFolderId: "1OtvXvY3EEcSDGReOsA7oqofVB60cJvU3",
   keywords: ["Course Overview", "Course Outline", "Target Audience", "Duration", "Prerequisites"],
   minMatches: 3,
+  verifyConcurrency: 4,
 };
+
+const MIME_DOC = "application/vnd.google-apps.document";
+const MIME_PDF = "application/pdf";
+const MIME_FOLDER = "application/vnd.google-apps.folder";
 
 let tokenClient = null;
 let accessToken = null;
-let candidates = []; // {id, name, webViewLink, createdTime, parents, matchCount, removed, status}
+let scanId = 0; // bumped on sign-out / new scan so stale scans stop writing state
+let candidates = []; // {id,name,webViewLink,createdTime,parents,matchCount,verified,movable,selected,removed,status,error}
 
 const el = (id) => document.getElementById(id);
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 function showError(boxId, message) {
   const box = el(boxId);
@@ -251,66 +267,117 @@ function clearError(boxId) {
 // Auth
 // ---------------------------------------------------------------------------
 
-window.onload = () => {
+function initAuth() {
+  if (tokenClient || !window.google?.accounts?.oauth2) return;
   tokenClient = google.accounts.oauth2.initTokenClient({
     client_id: CONFIG.clientId,
     scope: CONFIG.scope,
     callback: async (response) => {
       if (response.error) {
-        showError("signin-error", `Sign-in failed: ${response.error}`);
+        showError("signin-error", `Sign-in failed: ${response.error_description || response.error}`);
         return;
       }
       accessToken = response.access_token;
-      await onSignedIn();
+      try {
+        await onSignedIn();
+      } catch (e) {
+        signOut();
+        showError("signin-error", e.message);
+      }
     },
+    error_callback: (err) => showError("signin-error", `Sign-in failed: ${err.type || "unknown error"}`),
   });
+}
 
+window.addEventListener("load", () => {
+  initAuth(); // no-op if the GSI script has not finished loading; its onload retries
   el("signin-btn").addEventListener("click", () => {
     clearError("signin-error");
-    tokenClient.requestAccessToken({ prompt: "consent" });
+    if (CONFIG.clientId.startsWith("REPLACE_WITH")) {
+      showError("signin-error", "OAuth client ID is not configured. Set CONFIG.clientId in index.html.");
+      return;
+    }
+    if (!tokenClient) initAuth();
+    if (!tokenClient) {
+      showError("signin-error", "Google sign-in is still loading (or blocked). Try again in a moment.");
+      return;
+    }
+    tokenClient.requestAccessToken();
   });
   el("signout-btn").addEventListener("click", signOut);
   el("scan-btn").addEventListener("click", runScan);
   el("move-btn").addEventListener("click", moveSelected);
-};
+});
 
 async function onSignedIn() {
-  document.body.className = "state-signed-in";
   const res = await driveFetch("https://www.googleapis.com/drive/v3/about?fields=user(emailAddress)");
+  if (!res.ok) throw new Error(await errorMessage(res, "Could not read your Google account"));
   const data = await res.json();
   el("user-email").textContent = data.user?.emailAddress || "unknown";
+  document.body.className = "state-signed-in";
+  clearError("scan-error");
+
+  // Make sure the destination is reachable before the user scans.
+  const f = await driveFetch(
+    `https://www.googleapis.com/drive/v3/files/${CONFIG.outlinesFolderId}?supportsAllDrives=true&fields=id,capabilities(canAddChildren)`
+  );
+  if (!f.ok) {
+    showError("scan-error", "You can't access the Outlines folder. You can scan, but moving files will fail until you have access.");
+  } else if ((await f.json()).capabilities?.canAddChildren === false) {
+    showError("scan-error", "You don't have permission to add files to the Outlines folder; moves will fail.");
+  }
 }
 
 function signOut() {
-  if (accessToken) {
-    google.accounts.oauth2.revoke(accessToken, () => {});
-  }
+  scanId++;
+  if (accessToken) google.accounts.oauth2.revoke(accessToken, () => {});
   accessToken = null;
   candidates = [];
   document.body.className = "state-signed-out";
   el("results-section").style.display = "none";
+  el("scan-status").textContent = "";
+  el("scan-status").classList.remove("active");
+  el("scan-btn").disabled = false;
 }
 
+async function errorMessage(res, fallback) {
+  const err = await res.json().catch(() => ({}));
+  return err.error?.message || `${fallback} (HTTP ${res.status})`;
+}
+
+// Authenticated fetch with retry/backoff on rate limits and transient errors.
 async function driveFetch(url, options = {}) {
-  const res = await fetch(url, {
-    ...options,
-    headers: { ...(options.headers || {}), Authorization: `Bearer ${accessToken}` },
-  });
-  if (res.status === 401) {
-    signOut();
-    throw new Error("Session expired — please sign in again.");
+  for (let attempt = 0; ; attempt++) {
+    const res = await fetch(url, {
+      ...options,
+      headers: { ...(options.headers || {}), Authorization: `Bearer ${accessToken}` },
+    });
+    if (res.status === 401) {
+      signOut();
+      showError("signin-error", "Session expired — please sign in again.");
+      throw new Error("Session expired — please sign in again.");
+    }
+    const retryable = res.status === 429 || res.status >= 500 || (res.status === 403 && (await isRateLimit(res)));
+    if (retryable && attempt < 4) {
+      await sleep(500 * 2 ** attempt + Math.random() * 250);
+      continue;
+    }
+    return res;
   }
-  return res;
+}
+
+async function isRateLimit(res) {
+  const err = await res.clone().json().catch(() => ({}));
+  return (err.error?.errors || []).some((e) => /rateLimit|userRateLimit/i.test(e.reason || ""));
 }
 
 // ---------------------------------------------------------------------------
-// Search
+// Drive helpers
 // ---------------------------------------------------------------------------
 
-async function searchKeyword(keyword) {
-  const escaped = keyword.replace(/'/g, "\\'");
-  const q = `fullText contains '${escaped}' and trashed = false and (mimeType = 'application/vnd.google-apps.document' or mimeType = 'application/pdf')`;
+const quote = (s) => s.replace(/\\/g, "\\\\").replace(/'/g, "\\'");
 
+async function listFiles(q, fields) {
   let files = [];
   let pageToken = null;
   do {
@@ -319,121 +386,239 @@ async function searchKeyword(keyword) {
     url.searchParams.set("corpora", "allDrives");
     url.searchParams.set("includeItemsFromAllDrives", "true");
     url.searchParams.set("supportsAllDrives", "true");
-    url.searchParams.set("pageSize", "100");
-    url.searchParams.set("fields", "nextPageToken, files(id,name,webViewLink,createdTime,parents,mimeType)");
+    url.searchParams.set("pageSize", "1000");
+    url.searchParams.set("fields", `nextPageToken, files(${fields})`);
     if (pageToken) url.searchParams.set("pageToken", pageToken);
 
     const res = await driveFetch(url.toString());
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      throw new Error(err.error?.message || `Search for "${keyword}" failed (HTTP ${res.status})`);
-    }
+    if (!res.ok) throw new Error(await errorMessage(res, "Drive search failed"));
     const data = await res.json();
     files = files.concat(data.files || []);
     pageToken = data.nextPageToken;
   } while (pageToken);
-
   return files;
 }
 
+const FILE_FIELDS = "id,name,webViewLink,createdTime,parents,mimeType,capabilities(canEdit,canMoveItemWithinDrive,canMoveItemOutOfDrive)";
+
+function searchKeyword(keyword) {
+  const q = `fullText contains '${quote(keyword)}' and trashed = false and (mimeType = '${MIME_DOC}' or mimeType = '${MIME_PDF}')`;
+  return listFiles(q, FILE_FIELDS);
+}
+
+// All folder ids at or below the given roots, so already-filed files in subfolders are skipped.
+async function descendantFolders(rootIds) {
+  const seen = new Set(rootIds);
+  let frontier = [...rootIds];
+  while (frontier.length) {
+    const next = [];
+    for (let i = 0; i < frontier.length; i += 20) {
+      const chunk = frontier.slice(i, i + 20);
+      const parentClause = chunk.map((id) => `'${quote(id)}' in parents`).join(" or ");
+      const q = `mimeType = '${MIME_FOLDER}' and trashed = false and (${parentClause})`;
+      for (const f of await listFiles(q, "id")) {
+        if (!seen.has(f.id)) {
+          seen.add(f.id);
+          next.push(f.id);
+        }
+      }
+    }
+    frontier = next;
+  }
+  return seen;
+}
+
+// Count keywords that appear as a heading/label at the start of a line ("Duration: 3 days").
+function countHeadingMatches(text) {
+  const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return CONFIG.keywords.filter((k) =>
+    new RegExp(`^[\\s#*\\d.)•\\-–—]*${esc(k)}\\s*(?::|[-–—]|$)`, "im").test(text)
+  ).length;
+}
+
+async function verifyDoc(id) {
+  const res = await driveFetch(`https://www.googleapis.com/drive/v3/files/${id}/export?mimeType=text/plain`);
+  if (!res.ok) return null; // too large / no export access -> leave unverified
+  return countHeadingMatches(await res.text());
+}
+
+async function mapLimit(items, limit, fn) {
+  let i = 0;
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (i < items.length) await fn(items[i++]);
+  });
+  await Promise.all(workers);
+}
+
+// ---------------------------------------------------------------------------
+// Scan
+// ---------------------------------------------------------------------------
+
 async function runScan() {
   clearError("scan-error");
+  clearError("move-error");
+  const myScan = ++scanId;
+  const stale = () => myScan !== scanId;
+  const status = (html, active = true) => {
+    if (stale()) return;
+    el("scan-status").innerHTML = html;
+    el("scan-status").classList.toggle("active", active);
+  };
+
   el("scan-btn").disabled = true;
   el("results-section").style.display = "none";
   candidates = [];
 
-  const matchCounts = new Map();
-  const fileMeta = new Map();
-
   try {
-    for (const keyword of CONFIG.keywords) {
-      el("scan-status").innerHTML = `<span class="spinner"></span> searching "${keyword}"...`;
-      el("scan-status").classList.add("active");
-      const files = await searchKeyword(keyword);
+    status(`<span class="spinner"></span> searching ${CONFIG.keywords.length} keywords…`);
+    const [results, organized] = await Promise.all([
+      Promise.all(CONFIG.keywords.map(searchKeyword)),
+      descendantFolders([CONFIG.outlinesFolderId, CONFIG.kbArticlesFolderId]),
+    ]);
+    if (stale()) return;
+
+    const matchCounts = new Map();
+    const fileMeta = new Map();
+    for (const files of results) {
       for (const f of files) {
         matchCounts.set(f.id, (matchCounts.get(f.id) || 0) + 1);
         fileMeta.set(f.id, f);
       }
     }
 
-    const alreadyOrganized = new Set([CONFIG.outlinesFolderId, CONFIG.kbArticlesFolderId]);
-
     for (const [id, count] of matchCounts) {
       if (count < CONFIG.minMatches) continue;
       const meta = fileMeta.get(id);
       const parents = meta.parents || [];
-      if (parents.some((p) => alreadyOrganized.has(p))) continue; // already filed correctly
+      if (parents.some((p) => organized.has(p))) continue; // already filed correctly
+      const caps = meta.capabilities || {};
       candidates.push({
         id,
         name: meta.name,
         webViewLink: meta.webViewLink,
         createdTime: meta.createdTime,
+        mimeType: meta.mimeType,
         parents,
         matchCount: count,
+        verified: false,
+        movable: caps.canEdit !== false && caps.canMoveItemWithinDrive !== false,
+        selected: true,
         removed: false,
         status: "pending",
+        error: "",
       });
     }
-    candidates.sort((a, b) => b.matchCount - a.matchCount);
 
-    el("scan-status").textContent = `Done — checked ${CONFIG.keywords.length} keywords.`;
-    el("scan-status").classList.remove("active");
+    // Second pass: confirm Google Docs really use the keywords as headings.
+    const docs = candidates.filter((c) => c.mimeType === MIME_DOC);
+    let done = 0;
+    await mapLimit(docs, CONFIG.verifyConcurrency, async (c) => {
+      status(`<span class="spinner"></span> verifying documents (${done}/${docs.length})…`);
+      const n = await verifyDoc(c.id).catch(() => null);
+      if (n !== null) {
+        c.verified = true;
+        c.matchCount = n;
+      }
+      done++;
+    });
+    if (stale()) return;
+
+    candidates = candidates.filter((c) => c.matchCount >= CONFIG.minMatches);
+    candidates.forEach((c) => { if (!c.movable) c.selected = false; });
+    candidates.sort((a, b) => b.matchCount - a.matchCount || a.name.localeCompare(b.name));
+
+    status(`Done — ${candidates.length} candidate${candidates.length === 1 ? "" : "s"} from ${CONFIG.keywords.length} keywords.`, false);
     renderResults();
   } catch (e) {
+    if (stale()) return;
     showError("scan-error", e.message);
     el("scan-status").textContent = "";
+    el("scan-status").classList.remove("active");
   } finally {
-    el("scan-btn").disabled = false;
+    if (!stale()) el("scan-btn").disabled = false;
   }
 }
 
 // ---------------------------------------------------------------------------
-// Results rendering
+// Results rendering (DOM APIs only — no HTML string interpolation)
 // ---------------------------------------------------------------------------
+
+function h(tag, props = {}, ...children) {
+  const node = document.createElement(tag);
+  for (const [k, v] of Object.entries(props)) {
+    if (k === "class") node.className = v;
+    else if (k === "text") node.textContent = v;
+    else if (k.startsWith("on")) node.addEventListener(k.slice(2), v);
+    else if (v === true) node.setAttribute(k, "");
+    else if (v !== false && v != null) node.setAttribute(k, v);
+  }
+  for (const c of children.flat()) if (c) node.append(c);
+  return node;
+}
+
+function safeUrl(u) {
+  try {
+    const url = new URL(u);
+    return url.protocol === "https:" ? url.href : "#";
+  } catch {
+    return "#";
+  }
+}
+
+const isActionable = (c) => !c.removed && c.status !== "moved";
 
 function renderResults() {
   el("results-section").style.display = "block";
   const list = el("results-list");
-  list.innerHTML = "";
-
+  list.replaceChildren();
   el("empty-state").style.display = candidates.length === 0 ? "block" : "none";
 
   for (const c of candidates) {
-    const row = document.createElement("div");
-    row.className = "result-row" + (c.removed ? " removed" : "") + (c.status === "moved" ? " moved" : "");
-
+    const canSelect = isActionable(c) && c.movable && c.status !== "moving";
     const created = c.createdTime ? c.createdTime.split("T")[0] : "";
 
-    row.innerHTML = `
-      <input type="checkbox" ${c.removed || c.status === "moved" ? "" : "checked"}
-             ${c.removed || c.status === "moved" ? "disabled" : ""} data-id="${c.id}">
-      <div class="result-main">
-        <div class="result-title"><a href="${c.webViewLink}" target="_blank" rel="noopener">${escapeHtml(c.name)}</a></div>
-        <div class="result-meta">
-          <span>Created ${created}</span>
-          <span class="match-badge">${c.matchCount}/${CONFIG.keywords.length} matched</span>
-        </div>
-      </div>
-      <span class="row-status ${c.status}">${statusLabel(c.status)}</span>
-      ${c.status === "pending" && !c.removed ? '<button class="btn-danger-outline" data-remove="' + c.id + '">Remove</button>' : ""}
-    `;
+    const row = h(
+      "div",
+      { class: "result-row" + (c.removed ? " removed" : "") + (c.status === "moved" ? " moved" : "") },
+      h("input", {
+        type: "checkbox",
+        checked: c.selected && isActionable(c),
+        disabled: !canSelect,
+        "aria-label": `Select ${c.name}`,
+        onchange: (e) => {
+          c.selected = e.target.checked;
+          updateSelectionCount();
+        },
+      }),
+      h(
+        "div",
+        { class: "result-main" },
+        h("div", { class: "result-title" }, h("a", { href: safeUrl(c.webViewLink), target: "_blank", rel: "noopener noreferrer", text: c.name })),
+        h(
+          "div",
+          { class: "result-meta" },
+          h("span", { text: `Created ${created}` }),
+          h("span", { class: "match-badge", text: `${c.matchCount}/${CONFIG.keywords.length} matched` }),
+          c.verified ? h("span", { class: "tag ok", text: "verified" }) : h("span", { class: "tag", text: "unverified" }),
+          !c.movable ? h("span", { class: "tag", text: "no move permission" }) : null
+        ),
+        c.error ? h("div", { class: "row-error", text: c.error }) : null
+      ),
+      h("span", { class: `row-status ${c.status}`, text: statusLabel(c.status) }),
+      isActionable(c) && c.status !== "moving"
+        ? h("button", {
+            class: "btn-danger-outline",
+            "aria-label": `Remove ${c.name} from the list`,
+            text: "Remove",
+            onclick: () => {
+              c.removed = true;
+              renderResults();
+            },
+          })
+        : null
+    );
     list.appendChild(row);
   }
-
-  list.querySelectorAll("input[type=checkbox]").forEach((cb) => {
-    cb.addEventListener("change", (e) => {
-      updateSelectionCount();
-    });
-  });
-  list.querySelectorAll("[data-remove]").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      const id = btn.getAttribute("data-remove");
-      const c = candidates.find((x) => x.id === id);
-      if (c) c.removed = true;
-      renderResults();
-    });
-  });
-
   updateSelectionCount();
 }
 
@@ -441,26 +626,16 @@ function statusLabel(status) {
   return { pending: "", moving: "Moving…", moved: "Moved ✓", failed: "Failed" }[status] || "";
 }
 
-function escapeHtml(s) {
-  const div = document.createElement("div");
-  div.textContent = s;
-  return div.innerHTML;
-}
+const selectedCandidates = () => candidates.filter((c) => c.selected && c.movable && isActionable(c));
 
-function selectedCandidates() {
-  const checked = new Set(
-    Array.from(document.querySelectorAll("#results-list input[type=checkbox]:checked")).map((cb) => cb.getAttribute("data-id"))
-  );
-  return candidates.filter((c) => checked.has(c.id) && !c.removed && c.status !== "moved");
-}
-
+let moving = false;
 function updateSelectionCount() {
   const n = selectedCandidates().length;
-  el("stat-found").textContent = candidates.length;
+  el("stat-found").textContent = candidates.filter((c) => !c.removed).length;
   el("stat-selected").textContent = n;
   el("stat-moved").textContent = candidates.filter((c) => c.status === "moved").length;
   el("footer-count").textContent = n;
-  el("move-btn").disabled = n === 0;
+  el("move-btn").disabled = moving || n === 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -468,12 +643,17 @@ function updateSelectionCount() {
 // ---------------------------------------------------------------------------
 
 async function moveSelected() {
+  if (moving) return;
   clearError("move-error");
   const toMove = selectedCandidates();
+  moving = true;
   el("move-btn").disabled = true;
+  const failures = [];
 
   for (const c of toMove) {
+    if (!accessToken) break; // signed out mid-move
     c.status = "moving";
+    c.error = "";
     renderResults();
 
     try {
@@ -484,19 +664,26 @@ async function moveSelected() {
       url.searchParams.set("fields", "id,parents");
 
       const res = await driveFetch(url.toString(), { method: "PATCH" });
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({}));
-        throw new Error(err.error?.message || `HTTP ${res.status}`);
-      }
+      if (!res.ok) throw new Error(await errorMessage(res, "Move failed"));
+      const moved = await res.json();
+      c.parents = moved.parents || [CONFIG.outlinesFolderId];
       c.status = "moved";
+      c.selected = false;
     } catch (e) {
       c.status = "failed";
-      showError("move-error", `"${c.name}": ${e.message}`);
+      c.error = e.message;
+      failures.push(`"${c.name}": ${e.message}`);
     }
-    renderResults();
+    if (accessToken) renderResults();
   }
 
-  el("move-btn").disabled = selectedCandidates().length === 0;
+  moving = false;
+  if (!accessToken) return;
+  if (failures.length) {
+    showError("move-error", `${failures.length} file${failures.length === 1 ? "" : "s"} could not be moved:\n` + failures.join("\n"));
+    el("move-error").style.whiteSpace = "pre-wrap";
+  }
+  updateSelectionCount();
 }
 </script>
 </body>
